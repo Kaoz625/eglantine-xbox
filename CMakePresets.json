@@ -24,7 +24,8 @@
         "ENABLE_OPENGL": "ON",
         "YUZU_TESTS": "OFF",
         "DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT": "ON",
-        "DYNARMIC_UWP_APPCONTAINER": "ON"
+        "DYNARMIC_UWP_APPCONTAINER": "ON",
+        "ENABLE_NVIDIA_DLSS": "OFF"
       }
     }
   ],

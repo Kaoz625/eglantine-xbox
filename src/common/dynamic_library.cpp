@@ -84,6 +84,12 @@ std::string DynamicLibrary::GetVersionedFilename(const char* libname, int major,
 
 bool DynamicLibrary::Open(const char* filename) {
 #ifdef _WIN32
+#ifdef YUZU_UWP_APPCONTAINER
+    // A UWP app loads DLLs from its own package (the Xbox build ships Dozen, vulkan_dzn.dll)
+    const std::wstring wide_filename(filename, filename + std::strlen(filename));
+    handle = reinterpret_cast<void*>(LoadPackagedLibrary(wide_filename.c_str(), 0));
+    if (handle == nullptr)
+#endif
     handle = reinterpret_cast<void*>(LoadLibraryA(filename));
 #else
     handle = dlopen(filename, RTLD_NOW);

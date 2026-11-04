@@ -49,6 +49,7 @@
 #include "eden_uwp/game_download.h"
 #include "eden_uwp/http_vfs_file.h"
 #include "eden_uwp/gamepad.h"
+#include "eden_uwp/dozen_window.h"
 #include "eden_uwp/mesa_window.h"
 #include "eden_uwp/save_sync.h"
 #include "eden_uwp/setup_ui.h"
@@ -343,7 +344,9 @@ void CheckGameReads(const std::string& path) {
                            mismatches));
 }
 
-void RunGame(MesaWindow& window, const std::string& bundled_path, const std::atomic<bool>& closed,
+// GameWindow: DozenWindow (Vulkan) or MesaWindow (OpenGL); both count presented frames.
+template <typename GameWindow>
+void RunGame(GameWindow& window, const std::string& bundled_path, const std::atomic<bool>& closed,
              const std::shared_ptr<XboxGamepad>& gamepad, Lifecycle& lifecycle,
              bool chosen_in_library) {
     Diagnostic("GAME_BEGIN");
@@ -387,7 +390,8 @@ void RunGame(MesaWindow& window, const std::string& bundled_path, const std::ato
     }
     Common::Log::Initialize();
     FileSys::ResetRomfsVerification();
-    Settings::values.renderer_backend = Settings::RendererBackend::OpenGL_GLSL;
+    Settings::values.renderer_backend = UseVulkanRenderer() ? Settings::RendererBackend::Vulkan
+                                                            : Settings::RendererBackend::OpenGL_GLSL;
     // XAudio2 is the audio path available to UWP; NXBOX_AUDIO=null (LocalState\nxbox_env.txt)
     // falls back to silence.
     {
@@ -957,31 +961,41 @@ void RunGameView(const winrt::Windows::UI::Core::CoreWindow& window, const std::
         CoreApplication::Resuming(resuming_token);
     };
     // The driver targets the current HDMI surface. Layout remains 16:9 until resize handling lands.
-    auto graphics = std::make_shared<MesaWindow>(window, 1920, 1080);
-    std::thread worker([&, graphics = std::move(graphics)]() mutable {
-        winrt::init_apartment(winrt::apartment_type::multi_threaded);
-        SCOPE_EXIT {
-            // Keep the UI dispatcher alive while the graphics driver releases its resources.
-            graphics.reset();
-            winrt::uninit_apartment();
-            done.store(true, std::memory_order_release);
-        };
-        try {
-            RunGame(*graphics, path, closed, gamepad, lifecycle, chosen_in_library);
-            // The game is over and Eden released the save files: this is the safe point to upload.
-            if (sync_after_exit) {
-                Ui::SyncAfterExitHeadless(local_state, sync_game);
+    // Vulkan (Dozen + DXBC) runs on every Xbox; NXBOX_RENDERER=opengl in nxbox_env.txt picks
+    // Mesa's OpenGL, which needs Shader Model 6 (Series X|S).
+    ApplyEnvFile();
+    const auto play = [&](auto graphics) {
+        std::thread worker([&, graphics = std::move(graphics)]() mutable {
+            winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            SCOPE_EXIT {
+                // Keep the UI dispatcher alive while the graphics driver releases its resources.
+                graphics.reset();
+                winrt::uninit_apartment();
+                done.store(true, std::memory_order_release);
+            };
+            try {
+                RunGame(*graphics, path, closed, gamepad, lifecycle, chosen_in_library);
+                // The game is over and Eden released the save files: this is the safe point to
+                // upload.
+                if (sync_after_exit) {
+                    Ui::SyncAfterExitHeadless(local_state, sync_game);
+                }
+            } catch (const winrt::hresult_error& error) {
+                Diagnostic("GAME_FAIL " + winrt::to_string(error.message()));
+            } catch (const std::exception& error) {
+                Diagnostic(std::string("GAME_FAIL ") + error.what());
             }
-        } catch (const winrt::hresult_error& error) {
-            Diagnostic("GAME_FAIL " + winrt::to_string(error.message()));
-        } catch (const std::exception& error) {
-            Diagnostic(std::string("GAME_FAIL ") + error.what());
+        });
+        while (!done.load(std::memory_order_acquire)) {
+            window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
+            Sleep(1);
         }
-    });
-    while (!done.load(std::memory_order_acquire)) {
-        window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
-        Sleep(1);
+        worker.join();
+    };
+    if (UseVulkanRenderer()) {
+        play(std::make_shared<DozenWindow>(window, 1920, 1080));
+    } else {
+        play(std::make_shared<MesaWindow>(window, 1920, 1080));
     }
-    worker.join();
 }
 } // namespace EdenXbox

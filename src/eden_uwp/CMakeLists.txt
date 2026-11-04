@@ -9,6 +9,8 @@ add_executable(eden-uwp WIN32
     headless_emu_window.h
     uwp_boot.cpp
     vma_impl.cpp
+    dozen_window.cpp
+    dozen_window.h
     mesa_window.cpp
     mesa_window.h
     game_session.cpp
