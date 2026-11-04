@@ -661,7 +661,9 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
 
         if (asid.id != asid_2.id) [[unlikely]] {
             release_pending();
-            memory_device_inter = registered_processes[asid_2.id];
+            memory_device_inter = asid_2.id < registered_processes.size()
+                                      ? registered_processes[asid_2.id]
+                                      : nullptr;
         }
 
         if (vpage != old_vpage + 1) [[unlikely]] {

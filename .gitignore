@@ -65,5 +65,11 @@ artifacts
 vulkansdk*.exe
 *.tar.zst
 
+# NXbox local build products and working notes
+/homebrew/**/build/
+/build-port-tests*/
+/PEDIDOS.md
+tools/shader-share/data/
+
 # Build-time generated external sources
 externals/generated

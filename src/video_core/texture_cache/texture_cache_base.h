@@ -146,8 +146,14 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     std::map<u64, std::pair<u32, GPUVAddr>> created_shapes;
     bool debug_stats{true}; ///< Collect what only the debug statistics lines use
 
+#ifdef NXBOX_UWP
+    // The Xbox app budget also holds the guest's 4 GiB DRAM; keep the cache small (NXbox).
+    static constexpr s64 DEFAULT_EXPECTED_MEMORY = 512_MiB;
+    static constexpr s64 DEFAULT_CRITICAL_MEMORY = 768_MiB;
+#else
     static constexpr s64 DEFAULT_EXPECTED_MEMORY = 1_GiB + 125_MiB;
     static constexpr s64 DEFAULT_CRITICAL_MEMORY = 1_GiB + 625_MiB;
+#endif
     /// The most device memory the collector lets the cache fill before it collects in earnest,
     /// on every GPU (ApplyThresholdOverrides).
     static constexpr u64 MaxCriticalMemory = 5_GiB;

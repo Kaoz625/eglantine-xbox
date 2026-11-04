@@ -124,6 +124,8 @@ add_library(core STATIC
     file_sys/kernel_executable.h
     file_sys/nca_metadata.cpp
     file_sys/nca_metadata.h
+    file_sys/nsz.cpp
+    file_sys/nsz.h
     file_sys/partition_filesystem.cpp
     file_sys/partition_filesystem.h
     file_sys/patch_manager.cpp
@@ -136,6 +138,9 @@ add_library(core STATIC
     file_sys/nup_container.h
     file_sys/nup_writer.cpp
     file_sys/nup_writer.h
+    file_sys/romfs_read_diagnostics.h
+    file_sys/romfs_verify.cpp
+    file_sys/romfs_verify.h
     file_sys/romfs.cpp
     file_sys/romfs.h
     file_sys/romfs_factory.cpp
@@ -361,6 +366,7 @@ add_library(core STATIC
     hle/kernel/svc/svc_condition_variable.cpp
     hle/kernel/svc/svc_debug.cpp
     hle/kernel/svc/svc_debug_string.cpp
+    hle/kernel/svc/svc_debug_string.h
     hle/kernel/svc/svc_device_address_space.cpp
     hle/kernel/svc/svc_event.cpp
     hle/kernel/svc/svc_exception.cpp
@@ -1293,6 +1299,11 @@ endif()
 if (ENABLE_LTO AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT MSVC)
     # Fibers can migrate between host threads; keep kernel TLS lookups outside LTO callers.
     set_source_files_properties(hle/kernel/kernel.cpp PROPERTIES COMPILE_OPTIONS -fno-lto)
+endif()
+
+# NXbox: Xbox/UWP-specific limits inside core (the common target's YUZU_UWP_APPCONTAINER is private).
+if (CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+    target_compile_definitions(core PRIVATE NXBOX_UWP=1 YUZU_UWP_APPCONTAINER=1)
 endif()
 
 create_target_directory_groups(core)

@@ -119,6 +119,12 @@ A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) noexcept {
 
     for (auto& inst : block.instructions) {
         auto const opcode = inst.GetOpcode();
+        if (conf.collect_memory_access_context && IR::IsMemoryReadOrWrite(opcode)) {
+            const A64::LocationDescriptor location{IR::LocationDescriptor{inst.GetArg(0).GetU64()}};
+            // Immediate stores do not clobber live host registers or host flags.
+            code.mov(code.dword[code.ABI_JIT_PTR + offsetof(A64JitState, pc)], u32(location.PC()));
+            code.mov(code.dword[code.ABI_JIT_PTR + offsetof(A64JitState, pc) + 4], u32(location.PC() >> 32));
+        }
         // Call the relevant Emit* member function.
         switch (opcode) {
 #define OPCODE(name, type, ...) case IR::Opcode::name: goto opcode_branch;
@@ -751,6 +757,7 @@ bool A64EmitX64::EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDe
 
 void A64EmitX64::EmitPatchJg(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
     const CodePtr patch_location = code.getCurr();
+    code.PrepareWriteRange(patch_location, 23);
     if (target_code_ptr) {
         code.jg(target_code_ptr);
     } else {
@@ -763,6 +770,7 @@ void A64EmitX64::EmitPatchJg(const IR::LocationDescriptor& target_desc, CodePtr 
 
 void A64EmitX64::EmitPatchJz(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
     const CodePtr patch_location = code.getCurr();
+    code.PrepareWriteRange(patch_location, 23);
     if (target_code_ptr) {
         code.jz(target_code_ptr);
     } else {
@@ -775,6 +783,7 @@ void A64EmitX64::EmitPatchJz(const IR::LocationDescriptor& target_desc, CodePtr 
 
 void A64EmitX64::EmitPatchJmp(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
     const CodePtr patch_location = code.getCurr();
+    code.PrepareWriteRange(patch_location, 22);
     if (target_code_ptr) {
         code.jmp(target_code_ptr);
     } else {
@@ -790,6 +799,7 @@ void A64EmitX64::EmitPatchMovRcx(CodePtr target_code_ptr) {
         target_code_ptr = code.GetReturnFromRunCodeAddress();
     }
     const CodePtr patch_location = code.getCurr();
+    code.PrepareWriteRange(patch_location, 10);
     code.mov(code.rcx, u64(target_code_ptr));
     code.EnsurePatchLocationSize(patch_location, 10);
 }
@@ -797,9 +807,14 @@ void A64EmitX64::EmitPatchMovRcx(CodePtr target_code_ptr) {
 void A64EmitX64::Unpatch(const IR::LocationDescriptor& location) {
     EmitX64::Unpatch(location);
     if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
+#ifndef DYNARMIC_UWP_APPCONTAINER
         code.DisableWriting();
+#endif
+        // UWP keeps this immutable prelude on separate RX pages while patching blocks.
         (*fast_dispatch_table_lookup)(location.Value()) = {};
+#ifndef DYNARMIC_UWP_APPCONTAINER
         code.EnableWriting();
+#endif
     }
 }
 

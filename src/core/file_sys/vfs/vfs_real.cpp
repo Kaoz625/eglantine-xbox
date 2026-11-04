@@ -4,16 +4,22 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#ifdef YUZU_UWP_APPCONTAINER
+#include "common/fs/fs_uwp.h"
+#endif
+
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
 #include <utility>
+#include "common/nxbox_stall.h"
 #include "common/assert.h"
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "core/file_sys/vfs/vfs.h"
+#include "core/file_sys/romfs_read_diagnostics.h"
 #include "core/file_sys/vfs/vfs_real.h"
 
 // For FileTimeStampRaw
@@ -364,11 +370,23 @@ bool RealVfsFile::IsReadable() const {
 }
 
 std::size_t RealVfsFile::Read(u8* data, std::size_t length, std::size_t offset) const {
+    const NxboxStall::Scope stall_scope{NxboxStall::Kind::Io};
     auto lk = base.RefreshReference(path, perms, *reference);
     if (!reference->file || !reference->file->Seek(static_cast<s64>(offset))) {
         return 0;
     }
-    return reference->file->ReadSpan(std::span{data, length});
+    const auto read = reference->file->ReadSpan(std::span{data, length});
+    if (read != length && IsRomfsVerificationEnabled()) {
+        static std::atomic<u32> reported{};
+        if (reported.fetch_add(1, std::memory_order_relaxed) < 16) {
+            const int read_errno = errno;
+            LOG_ERROR(Loader,
+                      "NXBOX VERIFY_ROMFS IO_SHORT path={} offset={:#x} requested={:#x} "
+                      "actual={:#x} tell={:#x} errno={}",
+                      path, offset, length, read, reference->file->Tell(), read_errno);
+        }
+    }
+    return read;
 }
 
 std::size_t RealVfsFile::Write(const u8* data, std::size_t length, std::size_t offset) {
@@ -395,6 +413,16 @@ std::vector<VirtualFile> RealVfsDirectory::IterateEntries<RealVfsFile, VfsFile>(
 
     std::vector<VirtualFile> out;
 
+#ifdef YUZU_UWP_APPCONTAINER
+    FS::Uwp::ForEachEntry(std::filesystem::path{FS::ToU8String(path)},
+                         [this, &out](const std::filesystem::path& child, const WIN32_FIND_DATAW& data) {
+        if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            const u64 size = (static_cast<u64>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+            out.emplace_back(base.OpenFileFromEntry(FS::PathToUTF8String(child), size, path, perms));
+        }
+        return true;
+    });
+#else
     const FS::DirEntryCallable callback = [this,
                                            &out](const std::filesystem::directory_entry& entry) {
         const auto full_path_string = FS::PathToUTF8String(entry.path());
@@ -405,6 +433,8 @@ std::vector<VirtualFile> RealVfsDirectory::IterateEntries<RealVfsFile, VfsFile>(
     };
 
     FS::IterateDirEntries(path, callback, FS::DirEntryFilter::File);
+
+#endif
 
     return out;
 }
@@ -417,6 +447,15 @@ std::vector<VirtualDir> RealVfsDirectory::IterateEntries<RealVfsDirectory, VfsDi
 
     std::vector<VirtualDir> out;
 
+#ifdef YUZU_UWP_APPCONTAINER
+    FS::Uwp::ForEachEntry(std::filesystem::path{FS::ToU8String(path)},
+                         [this, &out](const std::filesystem::path& child, const WIN32_FIND_DATAW& data) {
+        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            out.emplace_back(base.OpenDirectory(FS::PathToUTF8String(child), perms));
+        }
+        return true;
+    });
+#else
     const FS::DirEntryCallable callback = [this,
                                            &out](const std::filesystem::directory_entry& entry) {
         const auto full_path_string = FS::PathToUTF8String(entry.path());
@@ -427,6 +466,8 @@ std::vector<VirtualDir> RealVfsDirectory::IterateEntries<RealVfsDirectory, VfsDi
     };
 
     FS::IterateDirEntries(path, callback, FS::DirEntryFilter::Directory);
+
+#endif
 
     return out;
 }
@@ -494,6 +535,23 @@ FileTimeStampRaw RealVfsDirectory::GetFileTimeStamp(std::string_view path_) cons
     const auto full_path = FS::SanitizePath(path + '/' + std::string(path_));
     const auto fs_path = std::filesystem::path{FS::ToU8String(full_path)};
 
+#ifdef YUZU_UWP_APPCONTAINER
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesExFromAppW(fs_path.c_str(), GetFileExInfoStandard, &data)) {
+        return {};
+    }
+    const auto unix_seconds = [](const FILETIME& time) -> u64 {
+        const u64 ticks = (static_cast<u64>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+        constexpr u64 EpochOffset = 11644473600ULL;
+        const auto seconds = ticks / 10000000;
+        return seconds > EpochOffset ? seconds - EpochOffset : 0;
+    };
+    return {
+        .created{unix_seconds(data.ftCreationTime)},
+        .accessed{unix_seconds(data.ftLastAccessTime)},
+        .modified{unix_seconds(data.ftLastWriteTime)},
+    };
+#else
 #ifdef _WIN32
     struct _stat64 file_status;
     const auto stat_result = _wstat64(fs_path.c_str(), &file_status);
@@ -511,6 +569,7 @@ FileTimeStampRaw RealVfsDirectory::GetFileTimeStamp(std::string_view path_) cons
         .accessed{static_cast<u64>(file_status.st_atime)},
         .modified{static_cast<u64>(file_status.st_mtime)},
     };
+#endif
 }
 
 std::vector<VirtualDir> RealVfsDirectory::GetSubdirectories() const {
@@ -575,6 +634,15 @@ std::map<std::string, VfsEntryType, std::less<>> RealVfsDirectory::GetEntries() 
 
     std::map<std::string, VfsEntryType, std::less<>> out;
 
+#ifdef YUZU_UWP_APPCONTAINER
+    FS::Uwp::ForEachEntry(std::filesystem::path{FS::ToU8String(path)},
+                         [&out](const std::filesystem::path& child, const WIN32_FIND_DATAW& data) {
+        out.insert_or_assign(FS::PathToUTF8String(child.filename()),
+                             (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                                 ? VfsEntryType::Directory : VfsEntryType::File);
+        return true;
+    });
+#else
     const FS::DirEntryCallable callback = [&out](const std::filesystem::directory_entry& entry) {
         const auto filename = FS::PathToUTF8String(entry.path().filename());
         out.insert_or_assign(filename,
@@ -583,6 +651,8 @@ std::map<std::string, VfsEntryType, std::less<>> RealVfsDirectory::GetEntries() 
     };
 
     FS::IterateDirEntries(path, callback);
+
+#endif
 
     return out;
 }

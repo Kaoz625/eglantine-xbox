@@ -271,6 +271,10 @@ Result NcaFileSystemDriver::OpenStorageImpl(VirtualFile* out, NcaFsHeaderReader*
                      ResultAllocationMemoryFailedAllocateShared);
         }
 
+        if (ctx != nullptr) {
+            ctx->original_indirectable_storage = original_indirectable_storage;
+        }
+
         // Create the indirect storage.
         VirtualFile indirect_storage;
         R_TRY(this->CreateIndirectStorage(
@@ -281,6 +285,10 @@ Result NcaFileSystemDriver::OpenStorageImpl(VirtualFile* out, NcaFsHeaderReader*
 
         // Set storage as the indirect storage.
         storage = std::move(indirect_storage);
+    }
+
+    if (ctx != nullptr) {
+        ctx->raw_storage = storage;
     }
 
     // Check if we're sparse or requested to skip the integrity layer.
@@ -851,7 +859,8 @@ Result NcaFileSystemDriver::CreateAesCtrExStorageMetaStorage(
 
     // Create buffered storage.
     std::vector<u8> meta_data(meta_size);
-    meta_storage->Read(meta_data.data(), meta_size, 0);
+    R_UNLESS(meta_storage->Read(meta_data.data(), meta_size, 0) == static_cast<size_t>(meta_size),
+             ResultInvalidNcaPatchInfoAesCtrExSize);
 
     auto buffered_storage = std::make_shared<VectorVfsFile>(std::move(meta_data));
     R_UNLESS(buffered_storage != nullptr, ResultAllocationMemoryFailedAllocateShared);
@@ -973,7 +982,9 @@ Result NcaFileSystemDriver::CreateIndirectStorageMetaStorage(VirtualFile* out,
 
     // Create buffered storage.
     std::vector<u8> meta_data(patch_info.indirect_size);
-    meta_storage->Read(meta_data.data(), patch_info.indirect_size, 0);
+    R_UNLESS(meta_storage->Read(meta_data.data(), patch_info.indirect_size, 0) ==
+                 static_cast<size_t>(patch_info.indirect_size.Get()),
+             ResultInvalidNcaPatchInfoIndirectSize);
 
     auto buffered_storage = std::make_shared<VectorVfsFile>(std::move(meta_data));
     R_UNLESS(buffered_storage != nullptr, ResultAllocationMemoryFailedAllocateShared);

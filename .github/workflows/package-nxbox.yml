@@ -1,0 +1,115 @@
+name: Package NXbox diagnostic
+on:
+  workflow_call:
+    inputs:
+      package_version:
+        required: true
+        type: string
+    secrets:
+      NXBOX_PFX_BASE64:
+        required: true
+      NXBOX_PFX_PASSWORD:
+        required: true
+  workflow_run:
+    workflows: [Build NXbox for Xbox Series X]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      build_run:
+        description: Successful main-branch build run ID
+        required: true
+        type: string
+      kind:
+        description: Diagnostic payload
+        type: choice
+        options: [cpu, game]
+        default: game
+      mesa_run:
+        description: Successful patched Mesa build run ID (required for game)
+        type: string
+        required: false
+permissions:
+  contents: read
+  actions: read
+jobs:
+  package:
+    if:
+      inputs.package_version != '' || github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.package_version != '' && github.sha || 'main' }}
+      - name: Validate source build
+        if: inputs.package_version == ''
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.build_run || github.event.workflow_run.id }}
+        shell: pwsh
+        run: |
+          if ($env:SOURCE_RUN -notmatch '^\d+$') { throw 'Invalid build run ID' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read source build' }
+          if ($run.conclusion -ne 'success' -or $run.head_branch -ne 'main' -or
+              $run.head_repository.full_name -ne $env:GITHUB_REPOSITORY -or
+              $run.path -ne '.github/workflows/build-nxbox.yml' -or
+              $run.event -notin @('push', 'workflow_dispatch')) {
+            throw 'Only successful, trusted main-branch NXbox builds may be packaged'
+          }
+          "run_id=$env:SOURCE_RUN" >> $env:GITHUB_OUTPUT
+          "revision=$($run.head_sha)" >> $env:GITHUB_OUTPUT
+      - uses: actions/download-artifact@v4
+        with:
+          name: nxbox-uwp-build
+          path: build-artifact
+          run-id: ${{ steps.source.outputs.run_id || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Test package staging
+        run: python -m unittest discover -s tests/port -p test_package.py -v
+      - name: Sign diagnostic package
+        env:
+          NXBOX_PFX_BASE64: ${{ secrets.NXBOX_PFX_BASE64 }}
+          NXBOX_PFX_PASSWORD: ${{ secrets.NXBOX_PFX_PASSWORD }}
+          SOURCE_REVISION: ${{ steps.source.outputs.revision || github.sha }}
+          RELEASE_VERSION: ${{ inputs.package_version }}
+          PACKAGE_KIND: ${{ inputs.kind || 'game' }}
+          MESA_RUN: ${{ inputs.mesa_run }}
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $executables = @(Get-ChildItem build-artifact -Recurse -Filter eden-uwp.exe)
+          if ($executables.Count -ne 1) { throw 'Expected exactly one built UWP executable' }
+          if ($env:PACKAGE_KIND -eq 'game') {
+            if (-not $env:MESA_RUN) {
+              # A pinned default went stale once and shipped a Mesa without the query fixes, so
+              # take the newest successful Mesa build from main unless a run is given.
+              $env:MESA_RUN = gh run list --repo $env:GITHUB_REPOSITORY --workflow mesa-uwp.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId'
+              if (-not $env:MESA_RUN) { throw 'No successful Mesa build found on main' }
+            }
+            Write-Host "Mesa runtime from run $env:MESA_RUN"
+            python tools/nxbox/fetch_mesa_build.py --run "$env:MESA_RUN" --output $executables[0].DirectoryName
+            if ($LASTEXITCODE -ne 0) { throw 'Mesa runtime staging failed' }
+            python tools/nxbox/prepare_dxil.py --output $executables[0].DirectoryName
+            if ($LASTEXITCODE -ne 0) { throw 'DXIL runtime staging failed' }
+          }
+          $version = if ($env:RELEASE_VERSION) { $env:RELEASE_VERSION } else { "0.3.$env:GITHUB_RUN_NUMBER.0" }
+          python tools/nxbox/package_uwp.py --kind "$env:PACKAGE_KIND" --exe $executables[0].FullName --version "$version" --output out
+          if ($LASTEXITCODE -ne 0) { throw 'Package creation failed' }
+          @{
+            emulatorRevision = $env:SOURCE_REVISION
+            packagingRevision = (git rev-parse HEAD)
+            diagnosticOnly = -not [bool]$env:RELEASE_VERSION
+            packageVersion = $version
+          } | ConvertTo-Json | Set-Content out/build-info.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.package_version != '' && 'nxbox-release' || 'nxbox-diagnostic' }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            out/*.appx
+            out/build-info.json

@@ -11,6 +11,9 @@
 #include <boost/icl/separate_interval_set.hpp>
 #include <windows.h>
 #include "common/dynamic_library.h"
+#ifdef YUZU_UWP_APPCONTAINER
+#include "common/nxbox_stall.h"
+#endif
 
 #else // ^^^ Windows ^^^ vvv POSIX vvv
 
@@ -52,12 +55,14 @@
 #endif // ^^^ POSIX ^^^
 
 #include <cstdlib>
+#include <atomic>
 #include <mutex>
 #include <random>
 
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/div_ceil.h"
+#include "common/demand_commit.h"
 #include "common/free_region_manager.h"
 #include "common/host_memory.h"
 #include "common/logging.h"
@@ -93,6 +98,28 @@ namespace Common {
 #define MEM_PRESERVE_PLACEHOLDER 0x00000002
 #endif
 
+// On the Xbox/UWP AppContainer the placeholder virtual-memory APIs used for the emulated DRAM must go
+// through the sandbox-legal *FromApp variants. The signatures of VirtualAlloc2FromApp and
+// MapViewOfFile3FromApp match their base versions (we just resolve a different export); only the file
+// mapping differs (CreateFileMappingFromApp has no extended-parameter form, so it takes the page
+// protection OR'd with SEC_COMMIT directly). VirtualFree/VirtualFreeEx/UnmapViewOfFile2/CloseHandle
+// are permitted in the AppContainer and are left unchanged.
+//
+// Auto-detected from the Windows SDK app-family partition (a UWP/WindowsStore CMake target defines
+// WINAPI_FAMILY == WINAPI_FAMILY_APP); force it for a desktop compile/run check with
+// -DYUZU_UWP_APPCONTAINER. The *FromApp exports also exist on desktop Win10+, so the forced build is
+// runtime-valid there too.
+// VirtualProtectFromApp is resolved dynamically (like the other kernelbase entry points below)
+// rather than called directly: a direct call would pull in the UWP/onecore import library, whereas
+// GetProcAddress keeps this translation unit free of link-time dependencies on the target's link set.
+// The plain desktop path keeps calling VirtualProtect directly, so it is byte-for-byte unchanged.
+#if defined(YUZU_UWP_APPCONTAINER) || (defined(WINAPI_FAMILY) && WINAPI_FAMILY == WINAPI_FAMILY_APP)
+#define HOST_MEMORY_USE_FROM_APP 1
+#define HOST_MEMORY_VIRTUAL_PROTECT pfn_VirtualProtectFromApp
+#else
+#define HOST_MEMORY_VIRTUAL_PROTECT VirtualProtect
+#endif
+
 using PFN_CreateFileMapping2 = _Ret_maybenull_ HANDLE(WINAPI*)(
     _In_ HANDLE File, _In_opt_ SECURITY_ATTRIBUTES* SecurityAttributes, _In_ ULONG DesiredAccess,
     _In_ ULONG PageProtection, _In_ ULONG AllocationAttributes, _In_ ULONG64 MaximumSize,
@@ -115,12 +142,78 @@ using PFN_MapViewOfFile3 = _Ret_maybenull_ PVOID(WINAPI*)(
 using PFN_UnmapViewOfFile2 = BOOL(WINAPI*)(_In_ HANDLE Process, _In_ PVOID BaseAddress,
                                            _In_ ULONG UnmapFlags);
 
+// AppContainer-legal file mapping. Unlike CreateFileMapping2 it has no extended-parameter form; the
+// page protection carries SEC_COMMIT directly (the same shape as classic CreateFileMapping).
+using PFN_CreateFileMappingFromApp = _Ret_maybenull_ HANDLE(WINAPI*)(
+    _In_ HANDLE File, _In_opt_ PSECURITY_ATTRIBUTES SecurityAttributes, _In_ ULONG PageProtection,
+    _In_ ULONG64 MaximumSize, _In_opt_ PCWSTR Name);
+
+// VirtualProtectFromApp — identical shape to VirtualProtect; resolved by name under the AppContainer.
+using PFN_VirtualProtect = BOOL(WINAPI*)(_In_ LPVOID Address, _In_ SIZE_T Size,
+                                         _In_ DWORD NewProtection, _Out_ PDWORD OldProtection);
+
+// VirtualAllocFromApp — reserves the private DRAM backing and demand-commits its pages (see below).
+using PFN_VirtualAllocFromApp = _Ret_maybenull_ PVOID(WINAPI*)(
+    _In_opt_ PVOID BaseAddress, _In_ SIZE_T Size, _In_ ULONG AllocationType, _In_ ULONG Protection);
+
+// Vectored-exception-handler APIs. Resolved by name (not called directly) so the binary does not hard-
+// import api-ms-win-core-errorhandling-l1-1-1.dll — an api-set the Xbox AppContainer loader does not
+// expose, which would make the app fail to ACTIVATE (no process, no crash dump). Kernelbase exports
+// both by name, so they resolve at runtime even though the api-set is absent.
+using PFN_AddVectoredExceptionHandler =
+    PVOID(WINAPI*)(_In_ ULONG First, _In_ PVECTORED_EXCEPTION_HANDLER Handler);
+using PFN_RemoveVectoredExceptionHandler = ULONG(WINAPI*)(_In_ PVOID Handle);
+
 template <typename T>
 static void GetFuncAddress(Common::DynamicLibrary& dll, const char* name, T& pfn) {
     if (!dll.GetSymbol(name, &pfn)) {
         LOG_CRITICAL(HW_Memory, "Failed to load {}", name);
     }
 }
+
+#ifdef HOST_MEMORY_USE_FROM_APP
+// Demand-commit for the Xbox/UWP backing. The backing is PRIVATE memory reserved (MEM_RESERVE) but
+// not eagerly committed — an eager 4 GiB commit busts the Series-S dev-app commit budget, and only
+// MEM_PRIVATE pages can be committed on demand (a MEM_MAPPED section view cannot). The first access
+// to a reserved-but-uncommitted page faults; this vectored handler commits the faulting page's chunk
+// on demand, so only what the guest/kernel actually touches is charged — a tiny homebrew NRO needs a
+// few MiB, while the kernel's full 4 GiB memory-pool layout stays valid. (CORE: Series-S memory.)
+//
+// There is exactly one emulated-DRAM backing (Core::DeviceMemory), so a single file-scope range +
+// committer suffices; the handler is allocation-free and re-entrancy-safe (atomic loads + one commit).
+namespace {
+std::atomic<u8*> g_backing_base{nullptr};
+std::atomic<size_t> g_backing_size{0};
+PFN_VirtualAllocFromApp g_pfn_virtual_alloc_from_app{nullptr};
+PFN_AddVectoredExceptionHandler g_pfn_add_veh{nullptr};
+PFN_RemoveVectoredExceptionHandler g_pfn_remove_veh{nullptr};
+void* g_backing_veh{nullptr};
+
+LONG NTAPI BackingDemandCommitHandler(EXCEPTION_POINTERS* ep) {
+    if (ep == nullptr || ep->ExceptionRecord == nullptr ||
+        ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+        ep->ExceptionRecord->NumberParameters < 2) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    u8* const base = g_backing_base.load(std::memory_order_acquire);
+    const size_t size = g_backing_size.load(std::memory_order_acquire);
+    if (base == nullptr || g_pfn_virtual_alloc_from_app == nullptr) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const auto chunk = DemandCommit::GetChunk(reinterpret_cast<std::uintptr_t>(base), size,
+                                              ep->ExceptionRecord->ExceptionInformation[1],
+                                              ep->ExceptionRecord->ExceptionInformation[0]);
+    if (!chunk) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if (g_pfn_virtual_alloc_from_app(base + chunk->offset, chunk->size, MEM_COMMIT,
+                                     PAGE_READWRITE)) {
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+} // namespace
+#endif
 
 class HostMemory::Impl {
 public:
@@ -136,11 +229,61 @@ public:
             LOG_CRITICAL(HW_Memory, "Failed to load Kernelbase.dll");
             return false;
         }
+#ifdef HOST_MEMORY_USE_FROM_APP
+        GetFuncAddress(kernelbase_dll, "CreateFileMappingFromApp", pfn_CreateFileMappingFromApp);
+        GetFuncAddress(kernelbase_dll, "VirtualAlloc2FromApp", pfn_VirtualAlloc2);
+        GetFuncAddress(kernelbase_dll, "MapViewOfFile3FromApp", pfn_MapViewOfFile3);
+        GetFuncAddress(kernelbase_dll, "VirtualProtectFromApp", pfn_VirtualProtectFromApp);
+#else
         GetFuncAddress(kernelbase_dll, "CreateFileMapping2", pfn_CreateFileMapping2);
         GetFuncAddress(kernelbase_dll, "VirtualAlloc2", pfn_VirtualAlloc2);
         GetFuncAddress(kernelbase_dll, "MapViewOfFile3", pfn_MapViewOfFile3);
+#endif
         GetFuncAddress(kernelbase_dll, "UnmapViewOfFile2", pfn_UnmapViewOfFile2);
 
+        // Allocate the linear DRAM backing.
+#ifdef HOST_MEMORY_USE_FROM_APP
+        // Xbox/UWP: back the emulated DRAM with demand-committable PRIVATE memory, not a file-mapping
+        // section. The section design exists only to alias the backing into virtual_base for fastmem
+        // — which is OFF on UWP (fastmem_arena is always null), so Map()/virtual_base are never used
+        // here (every Map/Unmap/VirtualBasePointer caller is fastmem- or NCE-gated, both off on UWP).
+        // Critically, ONLY MEM_PRIVATE pages can be committed on demand: VirtualAllocFromApp(MEM_COMMIT)
+        // cannot commit pages of a MEM_MAPPED section view in the AppContainer — that is why an earlier
+        // SEC_RESERVE section + demand-commit handler access-violated on-console. So reserve private
+        // address space now (no eager commit — a 4 GiB SEC_COMMIT busts the Series-S dev-app budget);
+        // the handler below commits 64 KiB chunks on first touch, charging only the touched working
+        // set while the full 4 GiB stays reserved (kernel memory-pool layout unchanged).
+        GetFuncAddress(kernelbase_dll, "VirtualAllocFromApp", g_pfn_virtual_alloc_from_app);
+        // Resolve the VEH APIs by name (see typedef note) so we do not hard-import the errorhandling
+        // api-set the Xbox loader lacks — a direct call there makes the app fail to activate on-console.
+        GetFuncAddress(kernelbase_dll, "AddVectoredExceptionHandler", g_pfn_add_veh);
+        GetFuncAddress(kernelbase_dll, "RemoveVectoredExceptionHandler", g_pfn_remove_veh);
+        if (g_pfn_virtual_alloc_from_app == nullptr || g_pfn_add_veh == nullptr ||
+            g_pfn_remove_veh == nullptr) {
+            // The UWP backing cannot work without these; there is no usable fallback in the sandbox.
+            throw std::bad_alloc{};
+        }
+        backing_base = static_cast<u8*>(
+            g_pfn_virtual_alloc_from_app(nullptr, backing_size, MEM_RESERVE, PAGE_READWRITE));
+        if (backing_base == nullptr) {
+            LOG_CRITICAL(HW_Memory, "Failed to reserve {} MiB of backing memory", backing_size >> 20);
+            throw std::bad_alloc{};
+        }
+        g_backing_base.store(backing_base, std::memory_order_release);
+        g_backing_size.store(backing_size, std::memory_order_release);
+        g_backing_veh = g_pfn_add_veh(/*first=*/1, BackingDemandCommitHandler);
+        if (g_backing_veh == nullptr) {
+            Release();
+            LOG_CRITICAL(HW_Memory, "Failed to install backing demand-commit handler");
+            throw std::bad_alloc{};
+        }
+        // No file-mapping section and no fastmem arena on UWP. VirtualBasePointer() returns null;
+        // that is tolerated by all callers (fastmem disabled).
+        backing_handle = nullptr;
+        virtual_base = nullptr;
+        return true;
+#else
+        // Desktop: a file-mapping section aliased into both the linear backing and the fastmem arena.
         if (!pfn_CreateFileMapping2 || !pfn_VirtualAlloc2 || !pfn_MapViewOfFile3 || !pfn_UnmapViewOfFile2) {
             LOG_CRITICAL(HW_Memory, "Failed to find functions for virtual allocs");
             return false;
@@ -174,6 +317,7 @@ public:
             return false;
         }
         return true;
+#endif
     }
 
     ~Impl() {
@@ -181,7 +325,16 @@ public:
     }
 
     void* Allocate(size_t size) {
+#ifdef HOST_MEMORY_USE_FROM_APP
+        // Plain VirtualAlloc is not usable in the AppContainer; go through the FromApp export when we
+        // managed to resolve it.
+        auto* ptr = g_pfn_virtual_alloc_from_app
+                        ? g_pfn_virtual_alloc_from_app(nullptr, size, MEM_RESERVE | MEM_COMMIT,
+                                                       PAGE_READWRITE)
+                        : VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
         auto* ptr = VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#endif
         if (ptr == nullptr) {
             LOG_CRITICAL(HW_Memory, "Failed to allocate fallback buffer with size {:#x}, error {}", size, GetLastError());
         }
@@ -226,7 +379,8 @@ public:
             const size_t offset = (std::max)(it->lower(), virtual_offset);
             const size_t protect_length = (std::min)(it->upper(), virtual_end) - offset;
             DWORD old_flags{};
-            if (!VirtualProtect(virtual_base + offset, protect_length, new_flags, &old_flags)) {
+            if (!HOST_MEMORY_VIRTUAL_PROTECT(virtual_base + offset, protect_length, new_flags,
+                                             &old_flags)) {
                 LOG_CRITICAL(HW_Memory, "Failed to change virtual memory protect rules");
             }
             ++it;
@@ -247,6 +401,22 @@ public:
 private:
     /// Release all resources in the object
     void Release() {
+#ifdef HOST_MEMORY_USE_FROM_APP
+        // UWP: private demand-committed backing, no section handle and no fastmem arena. Tear down the
+        // demand-commit handler first, then release the private reservation (committed pages included).
+        if (g_backing_veh != nullptr && g_pfn_remove_veh != nullptr) {
+            g_pfn_remove_veh(g_backing_veh);
+            g_backing_veh = nullptr;
+        }
+        g_backing_base.store(nullptr, std::memory_order_release);
+        g_backing_size.store(0, std::memory_order_release);
+        if (backing_base) {
+            if (!VirtualFree(backing_base, 0, MEM_RELEASE)) {
+                LOG_CRITICAL(HW_Memory, "Failed to free backing memory");
+            }
+            backing_base = nullptr;
+        }
+#else
         if (!placeholders.empty()) {
             for (const auto& placeholder : placeholders) {
                 if (!pfn_UnmapViewOfFile2(process, virtual_base + placeholder.lower(),
@@ -272,6 +442,7 @@ private:
         if (!CloseHandle(backing_handle)) {
             LOG_CRITICAL(HW_Memory, "Failed to free backing memory file handle");
         }
+#endif
     }
 
     /// Unmap one placeholder in the given range (partial unmaps are supported)
@@ -394,9 +565,11 @@ private:
 
     DynamicLibrary kernelbase_dll;
     PFN_CreateFileMapping2 pfn_CreateFileMapping2{};
+    PFN_CreateFileMappingFromApp pfn_CreateFileMappingFromApp{};
     PFN_VirtualAlloc2 pfn_VirtualAlloc2{};
     PFN_MapViewOfFile3 pfn_MapViewOfFile3{};
     PFN_UnmapViewOfFile2 pfn_UnmapViewOfFile2{};
+    PFN_VirtualProtect pfn_VirtualProtectFromApp{};
 
     std::mutex placeholder_mutex;                                 ///< Mutex for placeholders
     boost::icl::separate_interval_set<size_t> placeholders;       ///< Mapped placeholders
@@ -854,6 +1027,18 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
             bool cleared = false;
 #ifdef __linux__
             cleared = whole && punch && impl && impl->PunchHole(granule_begin, granule_end - granule_begin);
+#endif
+#ifdef HOST_MEMORY_USE_FROM_APP
+            // NXbox: the Xbox/UWP backing is demand-committed (BackingDemandCommitHandler), so
+            // decommitting a whole granule gives zero pages on its next touch without charging the
+            // app budget for memory the guest cleared but no longer uses.
+            if (whole) {
+#ifdef YUZU_UWP_APPCONTAINER
+                NxboxStall::Scope stall_scope{NxboxStall::Kind::Decommit};
+#endif
+                cleared = VirtualFree(backing_base + granule_begin, granule_end - granule_begin,
+                                      MEM_DECOMMIT) != 0;
+            }
 #endif
             if (!cleared) {
                 std::memset(backing_base + offset, 0, clear_end - offset);

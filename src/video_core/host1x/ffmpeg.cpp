@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "common/assert.h"
+#include "common/nxbox_stall.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -282,7 +283,13 @@ bool HardwareContext::InitializeWithType(AVHWDeviceType type) {
 DecoderContext::DecoderContext(const Decoder& decoder) : m_decoder{decoder} {
     m_codec_context = avcodec_alloc_context3(m_decoder.GetCodec());
     av_opt_set(m_codec_context->priv_data, "tune", "zerolatency", 0);
+#ifdef NXBOX_UWP
+    // One decode thread per core starved the Xbox's system services (Device Portal, input) while
+    // the emulator's CPU threads were busy; two slice threads are enough for the game's movies.
+    m_codec_context->thread_count = 2;
+#else
     m_codec_context->thread_count = 0;
+#endif
     m_codec_context->thread_type &= ~FF_THREAD_FRAME;
 #if defined(__ANDROID__)
     m_codec_context->flags |= AV_CODEC_FLAG_LOW_DELAY;
@@ -325,6 +332,7 @@ bool DecoderContext::OpenContext(const Decoder& decoder, std::span<const u8> ext
 }
 
 bool DecoderContext::SendPacket(const Packet& packet) {
+    NxboxStall::Scope stall_scope{NxboxStall::Kind::Video};
     if (const int ret = avcodec_send_packet(m_codec_context, packet.GetPacket()); ret < 0 && ret != AVERROR_EOF && ret != AVERROR(EAGAIN)) {
         LOG_ERROR(HW_GPU, "avcodec_send_packet error: {}", AVError(ret));
         return false;

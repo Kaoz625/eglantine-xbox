@@ -29,6 +29,10 @@
 // TODO: Have ARM flags in host flags and not have them use up GPR registers unless necessary.
 // TODO: Actually implement that proper instruction selector you've always wanted to sweetheart.
 
+#if __has_include("../../../../../common/nxbox_stall.h")
+#    include "../../../../../common/nxbox_stall.h"
+#endif
+
 namespace Dynarmic::Backend::X64 {
 
 using namespace Xbyak::util;
@@ -349,7 +353,10 @@ Xbyak::Label EmitX64::EmitCond(IR::Cond cond) {
 }
 
 EmitX64::BlockDescriptor EmitX64::RegisterBlock(const IR::LocationDescriptor& descriptor, CodePtr entrypoint, size_t size) {
+#if !defined(NXBOX_UWP)
+    // Windows has no perf-map writer; do not format a name for its no-op callback.
     PerfMapRegister(entrypoint, code.getCurr(), LocationDescriptorToFriendlyName(descriptor));
+#endif
     Patch(descriptor, entrypoint);
 
     BlockDescriptor block_desc{entrypoint, size};
@@ -415,6 +422,9 @@ void EmitX64::Unpatch(const IR::LocationDescriptor& target_desc) {
 }
 
 void EmitX64::ClearCache() {
+#if NXBOX_STALL_PROFILE
+    NxboxStall::AddJit(NxboxStall::JitEvent::ClearBlocks, block_descriptors.size());
+#endif
     block_descriptors.clear();
     patch_information.clear();
 
@@ -422,9 +432,20 @@ void EmitX64::ClearCache() {
 }
 
 void EmitX64::InvalidateBasicBlocks(const ::Common::unordered_set<IR::LocationDescriptor>& locations) {
+    // No patch sites or dispatch entries can change when there are no descriptors.
+    // Avoid flipping the entire committed code cache RW/RX for an empty invalidation.
+    if (locations.empty()) {
+#if NXBOX_STALL_PROFILE
+        NxboxStall::AddJit(NxboxStall::JitEvent::EmptyInvalidations);
+#endif
+        return;
+    }
     code.EnableWriting();
     for (const auto& descriptor : locations) {
         if (auto const it = block_descriptors.find(descriptor); it != block_descriptors.end()) {
+#if NXBOX_STALL_PROFILE
+            NxboxStall::AddJit(NxboxStall::JitEvent::RangeBlocks);
+#endif
             Unpatch(descriptor);
             block_descriptors.erase(it);
         }

@@ -229,6 +229,14 @@ endif()
 target_include_directories(audio_core PRIVATE ${OPUS_INCLUDE_DIRS})
 target_link_libraries(audio_core PUBLIC common core Opus::opus)
 
+if (CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+    target_sources(audio_core PRIVATE
+        sink/xaudio2_sink.cpp
+        sink/xaudio2_sink.h)
+    target_link_libraries(audio_core PRIVATE xaudio2)
+    target_compile_definitions(audio_core PRIVATE HAVE_XAUDIO2=1)
+endif()
+
 if (ENABLE_CUBEB)
     target_sources(audio_core PRIVATE
         sink/cubeb_sink.cpp
@@ -238,11 +246,17 @@ if (ENABLE_CUBEB)
     target_compile_definitions(audio_core PRIVATE HAVE_CUBEB=1)
 endif()
 
-target_sources(audio_core PRIVATE
-    sink/sdl3_sink.cpp
-    sink/sdl3_sink.h)
+if (NOT CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+    target_sources(audio_core PRIVATE
+        sink/sdl3_sink.cpp
+        sink/sdl3_sink.h)
 
-target_link_libraries(audio_core PRIVATE SDL3::SDL3)
-target_compile_definitions(audio_core PRIVATE HAVE_SDL3)
+    target_link_libraries(audio_core PRIVATE SDL3::SDL3)
+    target_compile_definitions(audio_core PRIVATE HAVE_SDL3)
+endif()
+# Xbox/UWP AppContainer: deliberately NO SDL3 audio device backend (XAudio2 / null sink only).
+# Linking SDL3 here would drag its entire desktop windowing/input stack (GDI32/SHELL32/USER32/
+# IMM32/SETUPAPI/HID/WINMM) into the app -- none of which the AppContainer provides -- so the
+# package fails to activate at load. (CORE: headless dep-strip.)
 
 create_target_directory_groups(audio_core)

@@ -25,6 +25,8 @@ add_executable(tests
     core/internal_network/socket_proxy.cpp
     core/nup_writer.cpp
     core/priority_queue.cpp
+    core/file_sys/bktr.cpp
+    core/file_sys/nsz.cpp
     core/internal_network/network.cpp
     video_core/memory_tracker.cpp
     video_core/h264_packet.cpp
