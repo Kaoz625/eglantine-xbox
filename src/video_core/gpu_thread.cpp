@@ -7,6 +7,7 @@
 #include <chrono>
 #include <thread>
 
+#include "common/nxbox_stall.h"
 #include "common/assert.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -132,6 +133,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 read->diagnostic->split = split.Active();
             }
             last_progress = std::chrono::steady_clock::now();
+            const NxboxStall::Scope busy_scope{NxboxStall::Kind::GpuBusy};
             if (split.Active()) {
                 // Only command lists are parsed here; everything else runs on the back thread
                 // in order, and so does the signal that the command ran.

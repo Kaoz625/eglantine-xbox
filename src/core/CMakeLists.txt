@@ -124,6 +124,8 @@ add_library(core STATIC
     file_sys/kernel_executable.h
     file_sys/nca_metadata.cpp
     file_sys/nca_metadata.h
+    file_sys/nsz.cpp
+    file_sys/nsz.h
     file_sys/partition_filesystem.cpp
     file_sys/partition_filesystem.h
     file_sys/patch_manager.cpp
@@ -357,6 +359,7 @@ add_library(core STATIC
     hle/kernel/svc/svc_condition_variable.cpp
     hle/kernel/svc/svc_debug.cpp
     hle/kernel/svc/svc_debug_string.cpp
+    hle/kernel/svc/svc_debug_string.h
     hle/kernel/svc/svc_device_address_space.cpp
     hle/kernel/svc/svc_event.cpp
     hle/kernel/svc/svc_exception.cpp
@@ -1285,4 +1288,8 @@ else()
     target_sources(core PRIVATE hle/service/ssl/ssl_backend_none.cpp)
 endif()
 
+# NXbox: Xbox/UWP-specific limits inside core (the common target's YUZU_UWP_APPCONTAINER is private).
+if (CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+    target_compile_definitions(core PRIVATE NXBOX_UWP=1 YUZU_UWP_APPCONTAINER=1)
+endif()
 create_target_directory_groups(core)

@@ -485,6 +485,10 @@ endif()
 
 if (ENABLE_OPENGL)
     target_compile_definitions(video_core PUBLIC HAS_OPENGL)
+    # Xbox renders OpenGL through Mesa's D3D12 backend, which has no multisampled storage images.
+    if (CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+        target_compile_definitions(video_core PRIVATE NXBOX_NO_MSAA_STORAGE_IMAGES)
+    endif()
 endif()
 
 if (ARCHITECTURE_x86_64)
@@ -499,4 +503,8 @@ if (ANDROID AND ARCHITECTURE_arm64)
     target_link_libraries(video_core PRIVATE adrenotools)
 endif()
 
+# NXbox: Xbox/UWP-specific limits (5 GiB process budget shared with the guest heap).
+if (CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+    target_compile_definitions(video_core PRIVATE NXBOX_UWP=1)
+endif()
 create_target_directory_groups(video_core)

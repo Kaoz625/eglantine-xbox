@@ -21,6 +21,9 @@
 
 #ifdef _WIN32
 #include <shlobj.h> // Used in GetExeDirectory()
+#if defined(YUZU_UWP_APPCONTAINER)
+#include <winrt/Windows.Storage.h> // App-local LocalFolder for the Xbox UWP/AppContainer
+#endif
 #else
 #include <cstdlib>     // Used in Get(Home/Data)Directory()
 #include <pwd.h>       // Used in GetHomeDirectory()
@@ -112,6 +115,18 @@ public:
         fs::path eden_path_cache;
         fs::path eden_path_config;
 #ifdef _WIN32
+#if defined(YUZU_UWP_APPCONTAINER)
+        // Xbox UWP/AppContainer: the package install dir is read-only and %AppData% is
+        // sandbox-redirected, so use the app's private LocalFolder (ApplicationData
+        // LocalState). It is always writable and is pullable over Device Portal - which
+        // is how QA retrieves eden_log.txt to assert the GATE-2 liveness sentinel.
+        eden_path = fs::path(std::wstring_view(
+                        winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path())) /
+                    EDEN_DIR;
+        eden_path_cache = eden_path / CACHE_DIR;
+        eden_path_config = eden_path / CONFIG_DIR;
+        // No %AppData% legacy-path migration under the sandbox.
+#else
         // User directory takes priority over global %AppData% directory
         eden_path = GetExeDirectory() / PORTABLE_DIR;
         if (!Exists(eden_path) || !IsDir(eden_path)) {
@@ -127,6 +142,7 @@ public:
         LEGACY_PATH(Yuzu, YUZU)
         LEGACY_PATH(Suyu, SUYU)
 #undef LEGACY_PATH
+#endif // YUZU_UWP_APPCONTAINER
 #elif __ANDROID__
         ASSERT(!eden_path.empty());
         eden_path_cache = eden_path / CACHE_DIR;
@@ -327,6 +343,18 @@ fs::path GetExeDirectory() {
 }
 
 fs::path GetAppDataRoamingDirectory() {
+#if defined(YUZU_UWP_APPCONTAINER)
+    // The Xbox/UWP AppContainer does not provide shell32 (SHGetKnownFolderPath); a hard import of it
+    // fails app activation at the loader, before any code runs. The app's private writable storage is
+    // the WinRT LocalFolder (same place the UWP user dir resolves, per Reinitialize above), so use
+    // that and never import shell32. Guarded like the other WinRT call in this file.
+    try {
+        return fs::path(std::wstring_view(
+            winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path()));
+    } catch (...) {
+        return GetExeDirectory();
+    }
+#else
     PWSTR appdata_roaming_path = nullptr;
 
     SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appdata_roaming_path);
@@ -340,6 +368,7 @@ fs::path GetAppDataRoamingDirectory() {
     }
 
     return fs_appdata_roaming_path;
+#endif
 }
 
 #else

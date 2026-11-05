@@ -16,6 +16,8 @@
 #include "core/crypto/key_manager.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/partition_filesystem.h"
+#include "core/file_sys/romfs_read_diagnostics.h"
+#include "core/file_sys/romfs_verify.h"
 #include "core/file_sys/vfs/vfs_offset.h"
 #include "core/loader/loader.h"
 
@@ -77,12 +79,43 @@ NCA::NCA(VirtualFile file_, const NCA* base_nca, bool allow_missing_base)
         reader->SetExternalDecryptionKey(titlekey.data(), titlekey.size());
     }
 
+    if (base_nca && !base_nca->reader) {
+        LOG_ERROR(Loader, "NXBOX NCA_PAIR FAIL update={} reason=uninitialized_base",
+                  file->GetName());
+        status = Loader::ResultStatus::ErrorBadNCAHeader;
+        return;
+    }
+
+    // A patch must use its original content record. Program patches cannot use
+    // Control, another program index, or an already patched NCA.
+    if (base_nca &&
+        (base_nca->is_update || reader->GetContentType() != base_nca->reader->GetContentType() ||
+         (reader->GetProgramId() & ~u64{0x800}) !=
+             (base_nca->reader->GetProgramId() & ~u64{0x800}) ||
+         reader->GetContentIndex() != base_nca->reader->GetContentIndex())) {
+        LOG_ERROR(Loader,
+                  "NXBOX NCA_PAIR FAIL update={} base={} update_title={:016X} base_title={:016X} "
+                  "update_index={} base_index={}",
+                  file->GetName(), base_nca->GetName(), reader->GetProgramId(),
+                  base_nca->reader->GetProgramId(), reader->GetContentIndex(),
+                  base_nca->reader->GetContentIndex());
+        status = Loader::ResultStatus::ErrorBadNCAHeader;
+        return;
+    }
+
     const s32 fs_count = reader->GetFsCount();
     NcaFileSystemDriver fs(base_nca ? base_nca->reader : nullptr, reader);
     std::vector<VirtualFile> filesystems(fs_count);
     for (s32 i = 0; i < fs_count; i++) {
         NcaFsHeaderReader header_reader;
-        if (Result rc = fs.OpenStorage(&filesystems[i], &header_reader, i); R_FAILED(rc)) {
+        NcaFileSystemDriver::StorageContext context{};
+        if (Result rc = fs.OpenStorageWithContext(&filesystems[i], &header_reader, i, &context);
+            R_FAILED(rc)) {
+            if (IsRomfsVerificationEnabled()) {
+                LOG_ERROR(Loader,
+                          "NXBOX VERIFY_ROMFS MOUNT_ERROR title={:016X} section={} result={:#x}",
+                          reader->GetProgramId(), i, rc.raw);
+            }
             status = Loader::ResultStatus::ErrorBadNCAHeader;
             return;
         }
@@ -90,6 +123,18 @@ NCA::NCA(VirtualFile file_, const NCA* base_nca, bool allow_missing_base)
         if (header_reader.GetFsType() == NcaFsHeader::FsType::RomFs) {
             files.push_back(filesystems[i]);
             romfs = files.back();
+            {
+                // The frontend may set the full-scan switch after content discovery.
+                // Always retain context; verification policy belongs to the final selection.
+                NcaFsHeader header{};
+                header_reader.GetRawData(&header, sizeof(header));
+                romfs_verification = std::make_unique<RomfsVerification>(
+                    romfs, header, std::move(context), reader->GetFsHeaderHash(i),
+                    reader->GetProgramId(),
+                    fmt::format("nca={} base={} section={}", file->GetName(),
+                                base_nca ? base_nca->file->GetName() : "none", i),
+                    base_nca != nullptr);
+            }
         }
 
         if (header_reader.GetFsType() == NcaFsHeader::FsType::PartitionFs) {
@@ -177,6 +222,17 @@ bool NCA::IsUpdate() const {
 
 VirtualFile NCA::GetRomFS() const {
     return romfs;
+}
+
+void NCA::VerifyRomFS(VirtualFile received, bool full) const {
+    if (romfs_verification) {
+        romfs_verification->Verify(std::move(received), full);
+    } else {
+        LOG_ERROR(Loader,
+                  "NXBOX ROMFS_CHECK FAIL blocks=0 bad=1 first_bad_offset=none "
+                  "source=base title={:016X} reason=no_mount_context",
+                  GetTitleId());
+    }
 }
 
 VirtualDir NCA::GetExeFS() const {

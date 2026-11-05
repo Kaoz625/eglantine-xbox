@@ -463,6 +463,13 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     if (driver_id == VK_DRIVER_ID_MESA_TURNIP) {
         supported_subgroup_stages &= ~(1u << static_cast<u32>(Shader::Stage::Geometry));
     }
+    // Without shuffles (Dozen on the Xbox One S: Shader Model 5.1 has no wave operations, only the
+    // basic subgroup feature is reported) every warp instruction takes its no-subgroup path, which
+    // the emitter already has for stages without subgroup support. Otherwise a guest SHFL becomes
+    // OpGroupNonUniformShuffle, which the host cannot compile (Donkey Kong Bananza's shaders).
+    if (!device.IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_SHUFFLE_BIT)) {
+        supported_subgroup_stages = 0;
+    }
     profile = Shader::Profile{
         .supported_spirv = device.SupportedSpirvVersion(),
         .unified_descriptor_binding = true,

@@ -34,9 +34,16 @@ VkSurfaceFormatKHR ChooseSwapSurfaceFormat(vk::Span<VkSurfaceFormatKHR> formats)
         format.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
         return format;
     }
+#ifdef NXBOX_UWP
+    // Dozen on the One S (SM 5.1 hardware) cannot view BGRA as RGBA: D3D12 casts only within a format
+    // family there (no relaxed format casting), and the present path views its frames as RGBA.
+    // An RGBA swapchain, as on Android, keeps every view in one family.
+    constexpr VkFormat preferred = VK_FORMAT_R8G8B8A8_UNORM;
+#else
+    constexpr VkFormat preferred = VK_FORMAT_B8G8R8A8_UNORM;
+#endif
     const auto& found = std::find_if(formats.begin(), formats.end(), [](const auto& format) {
-        return format.format == VK_FORMAT_B8G8R8A8_UNORM &&
-               format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        return format.format == preferred && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     });
     return found != formats.end() ? *found : formats[0];
 }
@@ -314,9 +321,11 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
     // the base format (imageFormat) MUST be included in pViewFormats
     const std::array view_formats{
         swapchain_ci.imageFormat,  // Base format MUST be first
+#ifndef NXBOX_UWP // RGBA there (ChooseSwapSurfaceFormat): no BGRA views of it
         VK_FORMAT_B8G8R8A8_UNORM,
         VK_FORMAT_B8G8R8A8_SRGB,
-#ifdef __ANDROID__
+#endif
+#if defined(__ANDROID__) || defined(NXBOX_UWP)
         VK_FORMAT_R8G8B8A8_UNORM,  // Android may use RGBA
         VK_FORMAT_R8G8B8A8_SRGB,
 #endif
@@ -341,8 +350,8 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
 
     images = swapchain.GetImages();
     image_count = static_cast<u32>(images.size());
-#ifdef __ANDROID__
-    // Android is already ordered the same as Switch.
+#if defined(__ANDROID__) || defined(NXBOX_UWP)
+    // Android is already ordered the same as Switch; the Xbox takes an RGBA swapchain (above).
     image_view_format = VK_FORMAT_R8G8B8A8_UNORM;
 #else
     image_view_format = VK_FORMAT_B8G8R8A8_UNORM;

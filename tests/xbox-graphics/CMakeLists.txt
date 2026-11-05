@@ -1,0 +1,43 @@
+cmake_minimum_required(VERSION 3.31)
+project(NXboxGraphicsProbe LANGUAGES CXX)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+    message(FATAL_ERROR "Configure this probe for WindowsStore")
+endif()
+add_executable(nxbox-graphics WIN32 main.cpp ../../src/common/sparse_memory.cpp)
+target_include_directories(nxbox-graphics PRIVATE ../../src)
+target_compile_features(nxbox-graphics PRIVATE cxx_std_20)
+target_compile_definitions(nxbox-graphics PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(nxbox-graphics PRIVATE /EHsc /W4)
+target_link_options(nxbox-graphics PRIVATE /APPCONTAINER)
+target_link_libraries(nxbox-graphics PRIVATE WindowsApp.lib)
+
+# Startup shaders of Eden's OpenGL renderer. The MSAA storage-image programs abort Mesa's D3D12
+# backend, so they run last.
+set(NXBOX_EDEN_SHADERS
+    astc_decoder.comp block_linear_unswizzle_2d.comp block_linear_unswizzle_3d.comp
+    pitch_unswizzle.comp opengl_copy_bc4.comp opengl_convert_s8d24.comp opengl_lmem_warmup.comp
+    full_screen_triangle.vert blit_color_float.frag opengl_present.vert opengl_present.frag
+    present_bicubic.frag convert_non_msaa_to_msaa.comp convert_msaa_to_non_msaa.comp)
+list(LENGTH NXBOX_EDEN_SHADERS _shader_count)
+set(_shader_header "${CMAKE_CURRENT_BINARY_DIR}/eden_shaders.h")
+set(_shader_body "#pragma once\n#include <array>\n#include <string_view>\n#include <utility>\n\nstruct EdenShader {\n    std::string_view name;\n    unsigned stage;\n    std::string_view code;\n};\n")
+set(_shader_table "inline constexpr std::array<EdenShader, ${_shader_count}> kEdenShaders{{\n")
+foreach(_file IN LISTS NXBOX_EDEN_SHADERS)
+    string(REPLACE "." "_" _name "${_file}")
+    if (_file MATCHES "\\.comp$")
+        set(_stage 0x91B9)
+    elseif (_file MATCHES "\\.vert$")
+        set(_stage 0x8B31)
+    else()
+        set(_stage 0x8B30)
+    endif()
+    set(_path "${CMAKE_CURRENT_SOURCE_DIR}/../../src/video_core/host_shaders/${_file}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_path}")
+    file(READ "${_path}" _hex HEX)
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "'\\\\x\\1'," _bytes "${_hex}")
+    string(APPEND _shader_body "inline constexpr char k_${_name}[] = {${_bytes}};\n")
+    string(APPEND _shader_table "    {\"${_file}\", ${_stage}, std::string_view(k_${_name}, sizeof(k_${_name}))},\n")
+endforeach()
+string(APPEND _shader_table "}};\n")
+file(WRITE "${_shader_header}" "${_shader_body}${_shader_table}")
+target_include_directories(nxbox-graphics PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")

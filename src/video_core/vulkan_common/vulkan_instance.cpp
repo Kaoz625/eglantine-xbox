@@ -121,8 +121,22 @@ vk::Instance CreateInstance(const Common::DynamicLibrary& library, vk::InstanceD
         throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
     }
     if (!library.GetSymbol("vkGetInstanceProcAddr", &dld.vkGetInstanceProcAddr)) {
-        LOG_ERROR(Render_Vulkan, "vkGetInstanceProcAddr not present in Vulkan");
-        throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
+#ifdef NXBOX_UWP
+        // The Xbox has no loader: Dozen is called as an ICD directly, the way a loader would,
+        // after agreeing on the loader interface version.
+        using NegotiateFn = VkResult(VKAPI_PTR*)(u32*);
+        NegotiateFn negotiate{};
+        if (library.GetSymbol("vk_icdNegotiateLoaderICDInterfaceVersion", &negotiate)) {
+            u32 icd_version = 5;
+            negotiate(&icd_version);
+            LOG_INFO(Render_Vulkan, "Vulkan ICD interface version {}", icd_version);
+        }
+        if (!library.GetSymbol("vk_icdGetInstanceProcAddr", &dld.vkGetInstanceProcAddr))
+#endif
+        {
+            LOG_ERROR(Render_Vulkan, "vkGetInstanceProcAddr not present in Vulkan");
+            throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
+        }
     }
     if (!vk::Load(dld)) {
         LOG_ERROR(Render_Vulkan, "Failed to load Vulkan function pointers");

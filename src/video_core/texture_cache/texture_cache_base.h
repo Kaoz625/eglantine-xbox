@@ -142,8 +142,14 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     u64 images_deleted{};
     std::map<u64, std::pair<u32, GPUVAddr>> created_shapes;
 
+#ifdef NXBOX_UWP
+    // The Xbox app budget also holds the guest's 4 GiB DRAM; keep the cache small (NXbox).
+    static constexpr s64 DEFAULT_EXPECTED_MEMORY = 512_MiB;
+    static constexpr s64 DEFAULT_CRITICAL_MEMORY = 768_MiB;
+#else
     static constexpr s64 DEFAULT_EXPECTED_MEMORY = 1_GiB + 125_MiB;
     static constexpr s64 DEFAULT_CRITICAL_MEMORY = 1_GiB + 625_MiB;
+#endif
     static constexpr size_t GC_EMERGENCY_COUNTS = 2;
 
     using Runtime = typename P::Runtime;

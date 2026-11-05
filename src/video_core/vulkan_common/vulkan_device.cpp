@@ -16,6 +16,7 @@
 #include "common/container/unordered_map.h"
 #include "common/container/unordered_set.h"
 #include <utility>
+#include <string_view>
 #include <vector>
 
 #include <fmt/format.h>
@@ -1175,6 +1176,21 @@ bool Device::GetSuitability(bool requires_swapchain) {
     // Base Vulkan 1.0 features are always valid regardless of instance version.
     features.features = features2.features;
 
+    // Dozen (Mesa's Vulkan on D3D12: Eglantine on the Xbox One S) lacks these on SM 5.1 hardware.
+    // They are rarely used or have fallbacks, so a missing one is logged, not a reason to call the
+    // device unsuitable. Its driver ID is not read yet here; its device name is.
+    const bool is_dozen =
+        std::string_view{properties.properties.deviceName}.starts_with("Microsoft Direct3D12");
+    const auto dozen_optional = [](const char* name) {
+        for (const char* optional : {"largePoints", "logicOp", "multiViewport", "tessellationShader",
+                                     "wideLines", "variablePointers", "variablePointersStorageBuffer"}) {
+            if (strcmp(name, optional) == 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+
 // Some features are mandatory. Check those.
 #define CHECK_FEATURE(feature, name)                                                               \
     if (!features.feature.name) {                                                                  \
@@ -1183,6 +1199,8 @@ bool Device::GetSuitability(bool requires_swapchain) {
                             strcmp(#name, "shaderCullDistance") == 0 ||                            \
                             strcmp(#name, "wideLines") == 0)) {                                    \
             LOG_INFO(Render_Vulkan, "MoltenVK missing feature {} - using fallback", #name);       \
+        } else if (is_dozen && dozen_optional(#name)) {                                            \
+            LOG_INFO(Render_Vulkan, "Dozen missing feature {} - optional on this driver", #name);  \
         } else {                                                                                    \
             LOG_ERROR(Render_Vulkan, "Missing required feature {}", #name);                        \
             suitable = false;                                                                       \

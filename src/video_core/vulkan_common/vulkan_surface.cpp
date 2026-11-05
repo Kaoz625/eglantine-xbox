@@ -20,8 +20,15 @@ vk::SurfaceKHR CreateSurface(
 #ifdef _WIN32
     if (window_info.type == Core::Frontend::WindowSystemType::Windows) {
         const HWND hWnd = static_cast<HWND>(window_info.render_surface);
+#ifdef NXBOX_UWP
+        // The Xbox has a CoreWindow, no HWND: the shadps4-xbox Dozen takes a Win32 surface whose
+        // hinstance is 'CORE' as one carrying the CoreWindow's IUnknown * in hwnd.
+        const HINSTANCE hInstance = reinterpret_cast<HINSTANCE>(uintptr_t{0x434f5245});
+#else
+        const HINSTANCE hInstance = nullptr;
+#endif
         const VkWin32SurfaceCreateInfoKHR win32_ci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
-                                                   nullptr, 0, nullptr, hWnd};
+                                                   nullptr, 0, hInstance, hWnd};
         const auto vkCreateWin32SurfaceKHR = reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(
             dld.vkGetInstanceProcAddr(*instance, "vkCreateWin32SurfaceKHR"));
         if (!vkCreateWin32SurfaceKHR ||

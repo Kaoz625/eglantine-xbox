@@ -1,11 +1,8 @@
 <!--
-# SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
-# SPDX-License-Identifier: GPL-3.0-or-later
-
-# SPDX-FileCopyrightText: 2018 yuzu Emulator Project
-# SPDX-License-Identifier: GPL-2.0-or-later
+SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
+SPDX-FileCopyrightText: 2018 yuzu Emulator Project
+SPDX-License-Identifier: GPL-3.0-or-later
 -->
-<!-- lang: en-GB -->
 
 <h1 align="center">
   <br>
@@ -59,24 +56,43 @@ Changes in this fork compared to upstream:
 
 The emulator is capable of running Mario Kart World at decent/full speed depending on specs and configurations, and Splatoon Raiders at variable performances
 
-A list of supported games will be available in future. Please be patient.
+## Where it stands
 
 ## Development
 For development discussions, please join us on [Discord](https://discord.gg/jCCZ58VExk)
 
 If you would like to contribute, we are open to new developers and pull requests. Please ensure that your work is of a high standard and properly documented. You can also contact any of the developers on Discord or Stoat to learn more about the current state of the emulator.
 
-## Documentation
+## How it works
 
-We have a user manual! See our [User Handbook](./docs/user/README.md).
+```mermaid
+flowchart LR
+    game["Switch game (.nsp)"] --> core["Eden core<br/>HLE services · Dynarmic JIT"]
+    core --> gl["OpenGL 4.6 renderer"]
+    gl --> mesa["Mesa d3d12 (patched)"]
+    mesa --> d3d["Direct3D 12 on Xbox"]
+    core --> audio["XAudio2"]
+    pad["Xbox controller"] --> core
+```
 
-## Building
+- `src/eden_uwp/`: the Xbox frontend. It boots the game, owns the window and the controller, and
+  writes `eden_uwp_diag.txt` with frame pacing, memory and stall attribution.
+- `tools/nxbox/patch_mesa_uwp.py`: the Mesa patches, applied to a pinned
+  [aerisarn/mesa-uwp](https://github.com/aerisarn/mesa-uwp) in CI.
+- `tools/shader-share/`: a small server that keeps the largest valid shader cache per title.
 
-See the [General Build Guide](docs/Build.md)
+## Trying it
 
-For information on provided development tooling, see the [Tools directory](./tools)
+You need an Xbox Series X|S in **Developer Mode** and your own dumps:
 
-## Download
+1. Install a package from the
+   [package workflow](https://github.com/NspxMiguel/NXbox/actions/workflows/package-nxbox.yml)
+   through the Device Portal.
+2. Put `prod.keys` and `title.keys` in the app's `LocalState\eden\keys`.
+3. Put your games (`.nsp`, `.nsz` or `.xci`) in `LocalState\games`, or on a USB drive in
+   `NXbox\games` (the console's internal developer storage is small, a few GB). `.nsz` files are
+   converted on the console the first time the library sees them.
+4. Launch NXbox from the dashboard and pick the game in the library.
 
 Builds of this fork are on the [releases page](https://github.com/zortos293/eglantine/releases).
 

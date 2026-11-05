@@ -9,9 +9,14 @@
 #include <algorithm>
 #include <windows.h>
 #include <mutex>
+#if defined(YUZU_UWP_APPCONTAINER)
+#include "common/sparse_memory.h"
+#endif
 #else
 #include <sys/mman.h>
 #endif
+
+#include <cstring>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -19,7 +24,16 @@
 
 namespace Common {
 
-#ifdef _WIN32
+#if defined(_WIN32) && defined(YUZU_UWP_APPCONTAINER)
+// Xbox/UWP AppContainer: the regular VirtualAlloc/VirtualProtect/VEH route is not available (or not
+// grantable) in the sandbox. Reservations come from SparseMemory, whose own vectored handler commits
+// zero-filled 64 KiB chunks on the first read or write fault. Committing a page here is therefore
+// just touching it.
+bool CommitVectorPage(uintptr_t addr, [[maybe_unused]] bool write) noexcept {
+    [[maybe_unused]] const u8 value = *reinterpret_cast<const volatile u8*>(addr);
+    return true;
+}
+#elif defined(_WIN32)
 static std::vector<std::pair<u64, u64>> vector_regions {};
 static std::mutex vector_regions_mutex {};
 
@@ -114,7 +128,10 @@ bool CommitVectorPage(uintptr_t addr, bool write) noexcept {
 #endif
 
 void DecommitVectorPage(uintptr_t base) noexcept {
-#if defined(_WIN32)
+#if defined(_WIN32) && defined(YUZU_UWP_APPCONTAINER)
+    // Chunks are committed by SparseMemory in 64 KiB units; zero the page in place instead.
+    std::memset(reinterpret_cast<void*>(base), 0, HostPageSize);
+#elif defined(_WIN32)
     VirtualFree(reinterpret_cast<LPVOID>(base), HostPageSize, MEM_DECOMMIT);
 #elif defined(__linux__)
     // Linux's MADV_DONTNEED zeros out pages for us
@@ -131,7 +148,10 @@ void* AllocateMemoryPages(std::size_t size) noexcept {
         size = AlignUp(size, page);
     }
 
-#ifdef _WIN32
+#if defined(_WIN32) && defined(YUZU_UWP_APPCONTAINER)
+    void* base = SparseMemory::Allocate(size);
+    ASSERT_MSG(base, "Failed to reserve {:#x} sized region", size);
+#elif defined(_WIN32)
     // We will never use this memory entirely so instead of committing it up front let's just reserve it and commit each page individually
     void* base = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_READWRITE);
 
@@ -162,7 +182,9 @@ void FreeMemoryPages(void* base, [[maybe_unused]] std::size_t size) noexcept {
     }
     if (!base)
         return;
-#ifdef _WIN32
+#if defined(_WIN32) && defined(YUZU_UWP_APPCONTAINER)
+    ASSERT(SparseMemory::Free(base));
+#elif defined(_WIN32)
     std::lock_guard lock(vector_regions_mutex);
     std::erase_if(vector_regions, [base](const auto& r) {return r.first == reinterpret_cast<u64>(base); });
     ASSERT(VirtualFree(base, 0, MEM_RELEASE));
