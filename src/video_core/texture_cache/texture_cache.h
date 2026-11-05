@@ -1101,7 +1101,7 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
     static const bool trace_native_image = std::getenv("EDEN_NX2_IMAGE_TRACE") != nullptr;
     static u64 framebuffer_queries{};
     const u64 query = trace_native_image ? framebuffer_queries++ : 0;
-    const bool trace = trace_native_image && (query % 240) == 0;
+    const bool trace = trace_native_image && (query < 48 || (query % 240) == 0);
     if (trace) {
         LOG_INFO(HW_GPU, "Native framebuffer query {}: physical={:#x} backing={:#x} allocation={}x{} "
                  "stride={} crop=({},{})-({},{})", query, cpu_addr,
