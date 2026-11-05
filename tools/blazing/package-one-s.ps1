@@ -12,7 +12,8 @@
 # Output: out-one-s\Eglantine_<version>_x64.appx. Install with `xbox install` plus the VCLibs appx.
 param([Parameter(Mandatory = $true)][string]$Version, [switch]$Game,
       [string]$Dzn = "C:\BlazingTools\build\mesa\src\build-dozen\src\microsoft\vulkan\vulkan_dzn.dll",
-      [string]$MesaLicense = "C:\BlazingTools\build\mesa\src\docs\license.rst")
+      [string]$MesaLicense = "C:\BlazingTools\build\mesa\src\docs\license.rst",
+      [string[]]$Extra = @())
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $out = Join-Path $root "out-one-s"
@@ -33,6 +34,9 @@ if (-not (Test-Path $Dzn)) { throw "no ${Dzn}: build Dozen first (shadps4-xbox t
 Copy-Item $Dzn $stage
 Copy-Item $MesaLicense (Join-Path $stage "Notices\Mesa-LICENSE.rst")
 Say ("vulkan_dzn.dll {0:N0} bytes, built {1}" -f (Get-Item $Dzn).Length, (Get-Item $Dzn).LastWriteTime)
+# -Extra: more files into the package root, for Dell-only test packages (e.g. the Windows SDK's dxil.dll, which
+# Dozen's DXIL path needs and the One S never uses). Never for a package meant for the Xbox.
+foreach ($e in ($Extra -split ";" | Where-Object { $_ })) { Copy-Item $e $stage; Say ("extra file {0}" -f $e) }
 if ($Game) {
   Copy-Item (Join-Path $root "homebrew\paddle-test\fixtures\game.nro") (Join-Path $stage "game.nro")
   Say "game.nro: the paddle-test homebrew (graphics game view)"
