@@ -409,7 +409,7 @@ std::vector<VirtualFile> RealVfsDirectory::IterateEntries<RealVfsFile, VfsFile>(
                          [this, &out](const std::filesystem::path& child, const WIN32_FIND_DATAW& data) {
         if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
             const u64 size = (static_cast<u64>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
-            out.emplace_back(base.OpenFileFromEntry(FS::PathToUTF8String(child), size, perms));
+            out.emplace_back(base.OpenFileFromEntry(FS::PathToUTF8String(child), size, path, perms));
         }
         return true;
     });
