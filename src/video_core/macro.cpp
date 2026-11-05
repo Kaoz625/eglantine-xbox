@@ -1453,8 +1453,9 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
         const auto emit = [&](u32 address, u32 value) {
                 if (address >= 0xe00) return false;
                 if (address == 0x556) {
-                    // SET_RENDER_ENABLE_OVERRIDE: 0 use the render-enable condition, 1 always,
-                    // 2 never. Log a histogram every 20000 macro writes (pop-in diagnostics).
+                    // SET_RENDER_ENABLE_C (render_enable.mode, 0x1558): 0 never, 1 always, 2-4 by the
+                    // condition in memory (4 counts as 0 here). Log a histogram every 20000 macro
+                    // writes (pop-in diagnostics).
                     static std::array<u64, 4> modes{};
                     static u64 enable_writes{};
                     ++modes[value & 3];

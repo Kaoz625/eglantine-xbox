@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -640,11 +641,54 @@ void Maxwell3D::ProcessQueryGet() {
 }
 
 void Maxwell3D::ProcessQueryCondition() {
+    // BLZ-0150: Dozen (the One S Vulkan) has no VK_EXT_conditional_rendering, so the condition is read here
+    // from guest memory, where a query the GPU has not written back yet would leave a stale value. agl
+    // wraps the composite's clears in render conditions (nxnative's DK note: drawn unconditionally, every
+    // gameplay frame is black). EDEN_NX2_RC_TRACE=<n> logs the first n decisions that are not plain
+    // "render"; EDEN_NX2_RC_SYNC flushes the query/buffer caches over the condition first. DK's menu
+    // (5 Nov) used no memory condition: only 6 "never" writes, so it is not the menu's black picture.
+    static const bool rc_sync = std::getenv("EDEN_NX2_RC_SYNC") != nullptr;
+    static const u32 rc_trace = [] {
+        const char* value = std::getenv("EDEN_NX2_RC_TRACE");
+        return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 0)) : 0U;
+    }();
+    static u32 rc_traced{};
     if (rasterizer->AccelerateConditionalRendering()) {
         execute_on = true;
         return;
     }
     const GPUVAddr condition_address{regs.render_enable.Address()};
+    const bool reads_memory =
+        regs.render_enable_override == Regs::RenderEnable::Override::UseRenderEnable &&
+        (regs.render_enable.mode == Regs::RenderEnable::Mode::Conditional ||
+         regs.render_enable.mode == Regs::RenderEnable::Mode::IfEqual ||
+         regs.render_enable.mode == Regs::RenderEnable::Mode::IfNotEqual);
+    Regs::ReportSemaphore::Compare before{};
+    const bool tracing = rc_traced < rc_trace &&
+                         (reads_memory || regs.render_enable.mode != Regs::RenderEnable::Mode::True ||
+                          regs.render_enable_override != Regs::RenderEnable::Override::UseRenderEnable);
+    if (tracing) {
+        memory_manager.ReadBlock(condition_address, &before, sizeof(before));
+    }
+    if (rc_sync && reads_memory) {
+        if (const auto device_address = memory_manager.GpuToCpuAddress(condition_address)) {
+            rasterizer->FlushRegion(*device_address, sizeof(Regs::ReportSemaphore::Compare),
+                                    VideoCommon::CacheType::QueryCache |
+                                        VideoCommon::CacheType::BufferCache);
+        }
+    }
+    SCOPE_EXIT {
+        if (tracing) {
+            ++rc_traced;
+            LOG_INFO(HW_GPU,
+                     "render condition: override {} mode {} addr {:#x} before seq {:#x}/{:#x} mode {:#x}/{:#x} "
+                     "-> execute {} (sync {})",
+                     static_cast<u32>(regs.render_enable_override),
+                     static_cast<u32>(regs.render_enable.mode), condition_address,
+                     before.initial_sequence, before.current_sequence, before.initial_mode,
+                     before.current_mode, execute_on, rc_sync);
+        }
+    };
     switch (regs.render_enable_override) {
     case Regs::RenderEnable::Override::AlwaysRender:
         execute_on = true;
