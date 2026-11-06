@@ -1089,6 +1089,24 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
         // Provide a framebuffer in case it's necessary
         ImageView& dst_view = slot_image_views[dst_view_id];
         ImageView& src_view = slot_image_views[src_view_id];
+        static const bool alias_trace = std::getenv("EDEN_NX2_ALIAS_TRACE") != nullptr;
+        static u32 blit_traced{};
+        const Image& traced_src = slot_images[src_id];
+        const Image& traced_dst = slot_images[dst_id];
+        if (alias_trace && (traced_dst.info.size.width >= 1280 || traced_src.info.size.width >= 1280) &&
+            blit_traced++ < 400) {
+            LOG_INFO(HW_GPU,
+                     "Blit: dst id={} gpu={:#x} {}x{} format={} view={} region=({},{})-({},{}) <- src "
+                     "id={} gpu={:#x} {}x{} format={} view={} tick={} region=({},{})-({},{}) "
+                     "src_addr={:#x} dst_addr={:#x}",
+                     dst_id.index, traced_dst.gpu_addr, traced_dst.info.size.width,
+                     traced_dst.info.size.height, traced_dst.info.format, images.dst_format,
+                     dst_region.start.x, dst_region.start.y, dst_region.end.x, dst_region.end.y,
+                     src_id.index, traced_src.gpu_addr, traced_src.info.size.width,
+                     traced_src.info.size.height, traced_src.info.format, images.src_format,
+                     traced_src.modification_tick, src_region.start.x, src_region.start.y,
+                     src_region.end.x, src_region.end.y, src.Address(), dst.Address());
+        }
         runtime.BlitImage(dst_framebuffer, dst_view, src_view, dst_region, src_region, copy.filter,
                           copy.operation);
     }
@@ -2642,7 +2660,20 @@ ImageViewId TextureCache<P>::FindColorBuffer(size_t index) {
         return ImageViewId{};
     }
     const ImageInfo info(regs.rt[index], regs.anti_alias_samples_mode);
-    return FindRenderTargetView(info, gpu_addr);
+    const ImageViewId view_id = FindRenderTargetView(info, gpu_addr);
+    static const bool alias_trace = std::getenv("EDEN_NX2_ALIAS_TRACE") != nullptr;
+    static u32 rt_traced{};
+    if (alias_trace && view_id && info.size.width >= 1280 && rt_traced < 400) {
+        ++rt_traced;
+        const ImageViewBase& view = slot_image_views[view_id];
+        const ImageBase& image = slot_images[view.image_id];
+        LOG_INFO(HW_GPU, "Color target {}: gpu={:#x} {}x{} rt_format={} view_format={} -> image id={} "
+                 "format={} gpu={:#x} tick={} aliases={}",
+                 index, gpu_addr, info.size.width, info.size.height, static_cast<u32>(rt.format),
+                 view.format, view.image_id.index, image.info.format, image.gpu_addr,
+                 image.modification_tick, image.aliased_images.size());
+    }
+    return view_id;
 }
 
 template <class P>
@@ -3530,6 +3561,26 @@ void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<Imag
         // BC1 and BC3 blocks differ in size, so the host can't copy between them; both hold the
         // same guest data, which is uploaded from guest memory instead.
         return;
+    }
+    {
+        // EDEN_NX2_ALIAS_TRACE: every copy between overlapping images (aliases, joins) - which way,
+        // which formats and which path (BLZ-0150: Donkey Kong Bananza's frames never reach the
+        // image the compositor shows on the Xbox One S)
+        static const bool alias_trace = std::getenv("EDEN_NX2_ALIAS_TRACE") != nullptr;
+        static u32 alias_traced{};
+        if (alias_trace && (dst.info.size.width >= 1280 || src.info.size.width >= 1280) &&
+            alias_traced++ < 400) {
+            const char* path = GetFormatType(dst.info.format) == GetFormatType(src.info.format)
+                                   ? "copy"
+                                   : (runtime.ShouldReinterpret(dst, src) ? "reinterpret" : "convert");
+            LOG_INFO(HW_GPU,
+                     "Alias copy: dst id={} gpu={:#x} {}x{} format={} tick={} <- src id={} gpu={:#x} "
+                     "{}x{} format={} tick={} copies={} path={}",
+                     dst_id.index, dst.gpu_addr, dst.info.size.width, dst.info.size.height,
+                     dst.info.format, dst.modification_tick, src_id.index, src.gpu_addr,
+                     src.info.size.width, src.info.size.height, src.info.format,
+                     src.modification_tick, copies.size(), path);
+        }
     }
     const bool is_rescaled = True(src.flags & ImageFlagBits::Rescaled);
     if (is_rescaled) {
